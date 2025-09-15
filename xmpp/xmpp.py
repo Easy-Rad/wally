@@ -169,7 +169,12 @@ class XMPP(slixmpp.ClientXMPP):
 
     def message_received(self, msg):
         if msg['type'] == 'chat':
-            payload = msg.xml.find('{com.intelerad.viewer.im.extensions.orderContainer2}orderContainer') or msg.xml.find('{com.intelerad.viewer.im.extensions.orderContainer}orderContainer') or msg.xml.find('{com.intelerad.viewer.im.extensions.phoneRequestAction}phoneRequestAction')
+            logging.info(f'{generate_pacs(msg['from'].bare)}: "{msg['body']}"')
+            payload = next((p for p in (
+                msg.xml.find('{com.intelerad.viewer.im.extensions.orderContainer2}orderContainer'),
+                msg.xml.find('{com.intelerad.viewer.im.extensions.orderContainer}orderContainer'),
+                msg.xml.find('{com.intelerad.viewer.im.extensions.phoneRequestAction}phoneRequestAction'),
+            ) if p is not None), None)
             reply = msg.reply(msg['body'] if payload is not None else f'{self.get_response(msg)}')
             reply['to']=reply['to'].bare
             if payload is not None: reply.set_payload(payload)
