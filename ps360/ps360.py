@@ -15,7 +15,7 @@ import psycopg
 HOST = environ['PS360_HOST']
 USERNAME = environ['PS360_USER']
 PASSWORD = environ['PS360_PASSWORD']
-SEARCH_PREVIOUS_MINUTES = 10
+SEARCH_PREVIOUS_MINUTES = 60
 TIME_ZONE_ID = 'New Zealand Standard Time'
 LOCALE = 'en-NZ'
 PS_VERSION = '7.0.212.0'
@@ -81,17 +81,17 @@ class Powerscribe:
                 logging.info(f'Signed out: session ID {sessionId}')
 
     def get_latest_orders(self):
-        now = datetime.now().astimezone()
         response = self.explorer_client.service.BrowseOrders(
             siteID=SITE_ID,
             time=dict(
                 Period='Custom',
                 From=self.last_updated.isoformat(timespec='milliseconds'),
-                To=now.isoformat(timespec='milliseconds'),
+                To=datetime.now().astimezone().isoformat(timespec='milliseconds'),
             ),
             orderStatus='Completed',
             transferStatus='All',
             reportStatus='Reported',
+            # accountID=123,
             sort='LastModifiedDate ASC',
             pageSize=3000,
             pageNumber=1,
@@ -99,10 +99,11 @@ class Powerscribe:
         ) or []
         if len(response):
             logging.info (f'Found {len(response)} updated orders since {self.last_updated}')
-        self.last_updated = now
         users_to_upload: set[int] = set()
         for report in response:
-            if report.Signer is not None and (events := self.report_client.service.GetReportEvents(
+            if report.LastModifiedDate > self.last_updated:
+                self.last_updated = report.LastModifiedDate
+            if (events := self.report_client.service.GetReportEvents(
                     reportID=report.ReportID,
                     eventsWithContent=True,
                     excludeViewEvents=True,
