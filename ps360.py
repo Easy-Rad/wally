@@ -93,7 +93,7 @@ class PS360:
             siteID=SITE_ID,
             time=dict(
                 Period='Custom',
-                From=(self.last_updated + timedelta(milliseconds=500)).isoformat(timespec='milliseconds'),
+                From=(self.last_updated + timedelta(milliseconds=1)).isoformat(timespec='milliseconds'),
                 To=datetime.now().astimezone().isoformat(timespec='milliseconds'),
             ),
             orderStatus='Completed',
@@ -105,54 +105,54 @@ class PS360:
             pageNumber=1,
             _soapheaders=[self._account_session],
         ) or []
-        if len(response):
-            logging.info (f'Found {len(response)} updated orders since {self.last_updated}')
-        users_to_upload: set[int] = set()
-        for report in response:
-            if report.LastModifiedDate > self.last_updated:
-                self.last_updated = report.LastModifiedDate
-            if (events := await self.report_client.service.GetReportEvents(
-                    reportID=report.ReportID,
-                    eventsWithContent=True,
-                    excludeViewEvents=True,
-                    fetchBlob=False,
-                    _soapheaders=[self._account_session],
-                )) is not None:
-                for event in events:
-                    try:
-                        event_type = EventType(event.Type)
-                    except ValueError:
-                        continue
-                    last_event = UserLastEvent(
-                        event_type,
-                        event.EventTime,
-                        event.Workstation,
-                        event.AdditionalInfo,
-                    )
-                    userId = event.Account.ID
-                    try:
-                        user = self.users[userId]
-                        if user.last_event.timestamp < last_event.timestamp:
-                            user.last_event = last_event
-                        else:
+        if len(response) > 0:
+            users_to_upload: set[int] = set()
+            for report in response:
+                if report.LastModifiedDate > self.last_updated:
+                    self.last_updated = report.LastModifiedDate
+                if (events := await self.report_client.service.GetReportEvents(
+                        reportID=report.ReportID,
+                        eventsWithContent=True,
+                        excludeViewEvents=True,
+                        fetchBlob=False,
+                        _soapheaders=[self._account_session],
+                    )) is not None:
+                    for event in events:
+                        try:
+                            event_type = EventType(event.Type)
+                        except ValueError:
                             continue
-                    except KeyError:
-                        user = User(
-                            userId,
-                            event.Account.Name,
-                            last_event,
+                        last_event = UserLastEvent(
+                            event_type,
+                            event.EventTime,
+                            event.Workstation,
+                            event.AdditionalInfo,
                         )
-                        self.users[userId] = user
-                    users_to_upload.add(userId)
-                    logging.info(f'{user.last_event.timestamp}: {user.last_event.event_type} by {user.name} (ID: {user.id}) on {user.last_event.workstation} ({user.last_event.additional_info})')
-        async with self.pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.executemany('''update users set ps360_last_event_type=%s, ps360_last_event_timestamp=%s, ps360_last_event_workstation=%s where ps360=%s''', [(
-                    self.users[userId].last_event.event_type,
-                    self.users[userId].last_event.timestamp,
-                    self.users[userId].last_event.workstation,
-                    userId,
-                ) for userId in users_to_upload])
+                        userId = event.Account.ID
+                        try:
+                            user = self.users[userId]
+                            if user.last_event.timestamp < last_event.timestamp:
+                                user.last_event = last_event
+                            else:
+                                continue
+                        except KeyError:
+                            user = User(
+                                userId,
+                                event.Account.Name,
+                                last_event,
+                            )
+                            self.users[userId] = user
+                        users_to_upload.add(userId)
+                        logging.info(f'{user.last_event.timestamp}: {user.last_event.event_type} by {user.name} (ID: {user.id}) on {user.last_event.workstation} ({user.last_event.additional_info})')
+            if len(users_to_upload) > 0:
+                async with self.pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.executemany('''update users set ps360_last_event_type=%s, ps360_last_event_timestamp=%s, ps360_last_event_workstation=%s where ps360=%s''', [(
+                            self.users[userId].last_event.event_type,
+                            self.users[userId].last_event.timestamp,
+                            self.users[userId].last_event.workstation,
+                            userId,
+                        ) for userId in users_to_upload])
 
     async def main_loop(self):
         while True:
