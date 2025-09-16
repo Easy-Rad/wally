@@ -79,21 +79,21 @@ class PS360:
         self._account_id = sign_in_result.SignInResult.AccountID
         self.first_name = sign_in_result.SignInResult.Person.FirstName
         self.last_name = sign_in_result.SignInResult.Person.LastName
-        logging.info(f'New Powerscribe session: {self.first_name} {self.last_name} with account ID {self._account_id} and session ID {self._account_session.text}')
+        logging.info(f'New PS360 session: {self.first_name} {self.last_name} with account ID {self._account_id} and session ID {self._account_session.text}')
 
     async def logout(self):
         if self._account_session is not None:
             sessionId = self._account_session.text
             if await self.session_client.service.SignOut(_soapheaders=[self._account_session]):
                 self._account_session = None
-                logging.info(f'Signed out: session ID {sessionId}')
+                logging.info(f'PS360 signed out: session ID {sessionId}')
 
     async def get_latest_orders(self):
         response = await self.explorer_client.service.BrowseOrders(
             siteID=SITE_ID,
             time=dict(
                 Period='Custom',
-                From=self.last_updated.isoformat(timespec='milliseconds'),
+                From=(self.last_updated + timedelta(milliseconds=500)).isoformat(timespec='milliseconds'),
                 To=datetime.now().astimezone().isoformat(timespec='milliseconds'),
             ),
             orderStatus='Completed',
@@ -156,21 +156,20 @@ class PS360:
 
     async def main_loop(self):
         while True:
-            logging.info("Starting new session")
+            logging.info("Starting new PS360 session")
             try:
                 await self.login(USERNAME, PASSWORD)
                 session_start_time = asyncio.get_event_loop().time()
                 while (asyncio.get_event_loop().time() - session_start_time) < SESSION_DURATION_SECONDS:
-                    logging.info("Starting inner loop...")
                     await self.get_latest_orders()
                     await asyncio.sleep(POLLING_INTERVAL_SECONDS)
-                logging.info("Session finished.")
+                logging.info("PS360 session finished.")
             except Exception as e:
-                logging.error(f"An error occurred: {e}")
+                logging.error(f"PS360 error occurred: {e}")
                 logging.info("Waiting for 1 minute before retrying...")
                 await asyncio.sleep(60)
             except asyncio.CancelledError:
-                logging.info("Loop cancelled, exiting...")
+                logging.info("PS360 loop cancelled, exiting...")
                 break
             finally:
                 await self.logout()

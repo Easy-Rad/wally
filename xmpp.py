@@ -142,7 +142,7 @@ class XMPP(slixmpp.ClientXMPP):
 
     async def main_loop(self):
         async with self.pool.connection() as conn:
-            logging.info("Setting all users to offline...")
+            logging.info("XMPP setting all users to offline...")
             await conn.execute("update users set pacs_presence='Offline'")
         while True:
             try:
@@ -154,5 +154,5 @@ class XMPP(slixmpp.ClientXMPP):
                 # This could catch OS-level errors if the server is unreachable
                 logging.error(f"XMPP connection failed: {e}")
             finally:
-                logging.info(f"Will attempt to reconnect in {RECONNECT_DELAY} seconds...")
+                logging.info(f"Reconnecting in {RECONNECT_DELAY} seconds...")
                 await asyncio.sleep(RECONNECT_DELAY)
