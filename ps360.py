@@ -1,25 +1,28 @@
-import time
+import asyncio
 import logging
+import httpx
 from os import environ
 from datetime import datetime, timedelta
 from enum import StrEnum
 from dataclasses import dataclass
-from zeep import Client, ns, Plugin
+from psycopg_pool import AsyncConnectionPool
+from zeep import AsyncClient, Plugin
 from zeep.cache import SqliteCache
-from zeep.transports import Transport
+from zeep.transports import AsyncTransport
 from zeep.ns import SOAP_ENV_12
 from lxml import etree # type: ignore
-import psycopg
-
 
 HOST = environ['PS360_HOST']
 USERNAME = environ['PS360_USER']
 PASSWORD = environ['PS360_PASSWORD']
-SEARCH_PREVIOUS_MINUTES = 60
 TIME_ZONE_ID = 'New Zealand Standard Time'
 LOCALE = 'en-NZ'
 PS_VERSION = '7.0.212.0'
 SITE_ID = 0
+
+SEARCH_PREVIOUS_MINUTES = 60
+SESSION_DURATION_SECONDS = 24 * 60 * 60  # 24 hours
+POLLING_INTERVAL_SECONDS = 5 * 60 # 5 minutes
 
 class EventType(StrEnum):
     SIGN = 'Sign'
@@ -40,7 +43,7 @@ class User():
     name: str
     last_event: UserLastEvent
 
-class Powerscribe:
+class PS360:
 
     _account_session: etree.Element | None
     _account_id: int
@@ -49,16 +52,21 @@ class Powerscribe:
     last_updated: datetime
     users: dict[int, User] = {}
 
-    def __init__(self):
+    def __init__(self, pool: AsyncConnectionPool):
+        self.pool = pool
         self.last_updated = datetime.now().astimezone() - timedelta(minutes=SEARCH_PREVIOUS_MINUTES)
         self._account_session = None
-        self._transport = Transport(cache=SqliteCache())
-        self.session_client = Client(f'http://{HOST}/RAS/Session.svc?wsdl', transport=self._transport, plugins=[SaveAccountSessionPlugin(self)])
-        self.explorer_client = Client(f'http://{HOST}/RAS/Explorer.svc?wsdl', transport=self._transport)
-        self.report_client = Client(f'http://{HOST}/RAS/Report.svc?wsdl', transport=self._transport)
+        self._transport = AsyncTransport(
+            cache=SqliteCache(timeout=None), # type: ignore
+            wsdl_client=httpx.Client(),
+            client=httpx.AsyncClient(),
+            )
+        self.session_client = AsyncClient(f'http://{HOST}/RAS/Session.svc?wsdl', transport=self._transport, plugins=[SaveAccountSessionPlugin(self)])
+        self.explorer_client = AsyncClient(f'http://{HOST}/RAS/Explorer.svc?wsdl', transport=self._transport)
+        self.report_client = AsyncClient(f'http://{HOST}/RAS/Report.svc?wsdl', transport=self._transport)
 
-    def login(self, username: str, password: str):
-        sign_in_result = self.session_client.service.SignIn(
+    async def login(self, username: str, password: str):
+        sign_in_result = await self.session_client.service.SignIn(
             loginName=username,
             password=password,
             adminMode=False,
@@ -73,15 +81,15 @@ class Powerscribe:
         self.last_name = sign_in_result.SignInResult.Person.LastName
         logging.info(f'New Powerscribe session: {self.first_name} {self.last_name} with account ID {self._account_id} and session ID {self._account_session.text}')
 
-    def logout(self):
+    async def logout(self):
         if self._account_session is not None:
             sessionId = self._account_session.text
-            if self.session_client.service.SignOut(_soapheaders=[self._account_session]):
+            if await self.session_client.service.SignOut(_soapheaders=[self._account_session]):
                 self._account_session = None
                 logging.info(f'Signed out: session ID {sessionId}')
 
-    def get_latest_orders(self):
-        response = self.explorer_client.service.BrowseOrders(
+    async def get_latest_orders(self):
+        response = await self.explorer_client.service.BrowseOrders(
             siteID=SITE_ID,
             time=dict(
                 Period='Custom',
@@ -103,7 +111,7 @@ class Powerscribe:
         for report in response:
             if report.LastModifiedDate > self.last_updated:
                 self.last_updated = report.LastModifiedDate
-            if (events := self.report_client.service.GetReportEvents(
+            if (events := await self.report_client.service.GetReportEvents(
                     reportID=report.ReportID,
                     eventsWithContent=True,
                     excludeViewEvents=True,
@@ -137,17 +145,39 @@ class Powerscribe:
                         self.users[userId] = user
                     users_to_upload.add(userId)
                     logging.info(f'{user.last_event.timestamp}: {user.last_event.event_type} by {user.name} (ID: {user.id}) on {user.last_event.workstation} ({user.last_event.additional_info})')
-        with psycopg.connect(environ['DB_CONN']) as conn:
-            with conn.cursor() as cur:
-                cur.executemany('''update users set ps360_last_event_type=%s, ps360_last_event_timestamp=%s, ps360_last_event_workstation=%s where ps360=%s''', [(
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.executemany('''update users set ps360_last_event_type=%s, ps360_last_event_timestamp=%s, ps360_last_event_workstation=%s where ps360=%s''', [(
                     self.users[userId].last_event.event_type,
                     self.users[userId].last_event.timestamp,
                     self.users[userId].last_event.workstation,
                     userId,
                 ) for userId in users_to_upload])
 
+    async def main_loop(self):
+        while True:
+            logging.info("Starting new session")
+            try:
+                await self.login(USERNAME, PASSWORD)
+                session_start_time = asyncio.get_event_loop().time()
+                while (asyncio.get_event_loop().time() - session_start_time) < SESSION_DURATION_SECONDS:
+                    logging.info("Starting inner loop...")
+                    await self.get_latest_orders()
+                    await asyncio.sleep(POLLING_INTERVAL_SECONDS)
+                logging.info("Session finished.")
+            except Exception as e:
+                logging.error(f"An error occurred: {e}")
+                logging.info("Waiting for 1 minute before retrying...")
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                logging.info("Loop cancelled, exiting...")
+                break
+            finally:
+                await self.logout()
+
+
 class SaveAccountSessionPlugin(Plugin):
-    def __init__(self, ps : Powerscribe):
+    def __init__(self, ps : PS360):
         self.ps = ps
 
     def ingress(self, envelope, http_headers, operation):
@@ -156,23 +186,3 @@ class SaveAccountSessionPlugin(Plugin):
 
     def egress(self, envelope, http_headers, operation, binding_options):
         return envelope, http_headers
-
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, format='%(levelname)-8s %(message)s')
-    ps = Powerscribe()
-    while True:  # Outer loop for the login/logout cycle
-        logging.info("Starting new session")
-        try:
-            ps.login(USERNAME, PASSWORD)
-            session_duration = 24 * 60 * 60  # 24 hours in seconds
-            session_start_time = time.time()
-            while (time.time() - session_start_time) < session_duration:
-                ps.get_latest_orders()
-                time.sleep(60) # 1 minute in seconds
-            logging.info("Session finished.")
-        except Exception as e:
-            logging.error(f"An error occurred in the main loop: {e}")
-            logging.info("Retrying after 1 minute...")
-            time.sleep(60)
-        finally:
-            ps.logout()

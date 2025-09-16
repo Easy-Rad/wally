@@ -2,5 +2,29 @@
 	"name": "wally",
     "build": {"dockerfile": "Dockerfile"},
 	"postCreateCommand": "pip3 install --user -r requirements.txt",
-	"runArgs": ["--env-file",".env"]
+	"runArgs": [
+		"--env-file",
+		".env"
+	],
+	"features": {
+		"ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+			"moby": true,
+			"installDockerBuildx": true,
+			"installDockerComposeSwitch": true,
+			"version": "latest",
+			"dockerDashComposeVersion": "v2"
+		}
+	},
+	"customizations": {
+        "vscode": {
+            "extensions": [
+				"ms-python.autopep8",
+				"ms-python.debugpy",
+				"ms-python.python",
+				"ms-python.vscode-pylance",
+				"ms-python.vscode-python-envs"
+            ]
+        }
+    }
+
 }

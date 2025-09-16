@@ -1,7 +1,0 @@
-services:
-  ps360:
-    build:
-      target: service_ps360
-  xmpp:
-    build:
-      target: service_xmpp

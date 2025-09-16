@@ -1,4 +1,0 @@
-slixmpp
-psycopg[binary]
-psycopg-pool
-pymssql

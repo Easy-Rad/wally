@@ -1,0 +1,7 @@
+psycopg[binary]
+psycopg-pool
+lxml
+httpx
+zeep[async]
+slixmpp
+pymssql
