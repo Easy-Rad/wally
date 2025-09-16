@@ -114,31 +114,51 @@ class XMPP(slixmpp.ClientXMPP):
             if payload is not None: reply.set_payload(slixmpp.ElementBase(payload))
             reply.send()
 
+
+    async def phys_sched_roster(self, first_name: str, last_name: str, physch_abbr: str, tomorrow: bool) -> str:
+        with phys_sched_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(r"""
+                    select ShiftName
+                    from SchedData
+                    join Employee on SchedData.EmployeeID = Employee.EmployeeID
+                    join Shift on SchedData.ShiftID = Shift.ShiftID
+                    where AssignDate = year(CURRENT_TIMESTAMP) * 10000 + month(CURRENT_TIMESTAMP) * 100 + day(CURRENT_TIMESTAMP) + %s
+                    and Employee.Abbr = %s
+                    order by Shift.DisplayOrder, Shift.ShiftName
+                    """, (1 if tomorrow else 0, physch_abbr))
+                return f'''\n{"Tomorrow" if tomorrow else "Today"}'s roster for {first_name} {last_name} ({physch_abbr}):\n{'\n'.join(shift for shift, in cursor)}''' # type: ignore
+
     async def generate_response(self, msg: slixmpp.Message) -> str:
-        match msg['body']:
-            case 'roster':
-                pacs = generate_pacs(msg.get_from().bare)
-                async with self.pool.connection() as conn:
-                    async with await conn.execute("select first_name, last_name, physch from users where pacs=%s", (pacs,)) as cur:
-                        result = await cur.fetchone()
-                if result is not None:
-                    first_name, last_name, physch = result
-                    with phys_sched_connection() as conn:
-                        with conn.cursor() as cursor:
-                            cursor.execute(r"""
-                                select ShiftName
-                                from SchedData
-                                join Employee on SchedData.EmployeeID = Employee.EmployeeID
-                                join Shift on SchedData.ShiftID = Shift.ShiftID
-                                where AssignDate = year(CURRENT_TIMESTAMP) * 10000 + month(CURRENT_TIMESTAMP) * 100 + day(CURRENT_TIMESTAMP)
-                                and Employee.Abbr = %s
-                                order by Shift.DisplayOrder, Shift.ShiftName
-                                """, (physch,))
-                            return f'''\nToday's roster for {first_name} {last_name} ({physch}):\n{'\n'.join(shift for shift, in cursor)}''' # type: ignore
+        message: str = msg['body'].strip()
+        roster_pattern = r"^roster(.*)$"
+        roster_match = re.search(roster_pattern, message, re.IGNORECASE)
+        if roster_match:
+            custom_user: str | None = None
+            tomorrow = False
+            if roster_match.group(1).strip().lower() == 'tomorrow':
+                tomorrow = True
+            else:
+                custom_user = roster_match.group(1).strip() or None
+            async with self.pool.connection() as conn:
+                pacs = generate_pacs(msg.get_from().bare) if custom_user is None else None
+                if custom_user is None:
+                    pacs = generate_pacs(msg.get_from().bare)
+                    coroutine = conn.execute("select first_name, last_name, physch from users where pacs=%s", (pacs,))
                 else:
-                    return f'Username "{pacs}" is not registered in the database, please contact my overlords'
-            case _:
-                return '''\nEchobot commands:\nroster: Show today's roster'''
+                    pacs = None
+                    coroutine = conn.execute("select first_name, last_name, physch from users where %s in (lower(pacs), lower(ris), lower(physch), lower(sso), lower(first_name), lower(last_name)) limit 1", (custom_user.lower(),))
+                async with await coroutine as cur:
+                    result = await cur.fetchone()
+            if result is not None:
+                first_name, last_name, physch = result
+                return await self.phys_sched_roster(first_name, last_name, physch, tomorrow)
+            elif pacs is not None:
+                return f'Username "{pacs}" is not registered in the database, please contact my overlords'
+            else:
+                return f'Could not find a user matching "{custom_user}"'
+        else:
+            return '''\nEchoBot commands:\nroster: Show today's roster\nroster tomorrow: Show tomorrow's roster\nroster <name or login>: Show roster for another user'''
 
     async def main_loop(self):
         async with self.pool.connection() as conn:
