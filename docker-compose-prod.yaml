@@ -1,0 +1,4 @@
+services:
+  wally:
+    build:
+      target: service_wally

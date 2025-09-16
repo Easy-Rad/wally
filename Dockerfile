@@ -1,4 +1,4 @@
-FROM python:3-alpine
+FROM python:3-alpine AS service_wally
 COPY certificates/corporate.crt /usr/local/share/ca-certificates
 RUN update-ca-certificates
 RUN adduser -D app

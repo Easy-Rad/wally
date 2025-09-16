@@ -1,0 +1,12 @@
+services:
+  wally:
+    env_file: .env
+    build:
+      target: service_wally
+    develop:
+      watch:
+        - action: sync+restart
+          path: .
+          target: /app
+        - action: rebuild
+          path: ./requirements.txt
