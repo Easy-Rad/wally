@@ -13,6 +13,7 @@ XMPP_JID = environ['XMPP_JID']
 XMPP_PASSWORD = environ['XMPP_PASSWORD']
 XMPP_SERVER = environ.get('XMPP_SERVER', 'app-inteleradha-p.healthhub.health.nz')
 XMPP_PORT = int(environ.get('XMPP_PORT', '5222'))
+XMPP_RESET_PRESENCE = (environ.get('XMPP_RESET_PRESENCE', 'False') == 'True')
 PHYSCH_HOST = environ['PHYSCH_HOST']
 PHYSCH_DB = environ.get('PHYSCH_DB', 'PhySch')
 SSO_USER = environ['SSO_USER']
@@ -125,7 +126,7 @@ class XMPP(slixmpp.ClientXMPP):
                     join Shift on SchedData.ShiftID = Shift.ShiftID
                     where AssignDate = year(CURRENT_TIMESTAMP) * 10000 + month(CURRENT_TIMESTAMP) * 100 + day(CURRENT_TIMESTAMP) + %s
                     and Employee.Abbr = %s
-                    order by Shift.DisplayOrder, Shift.ShiftName
+                    order by Shift.StartTime, Shift.EndTime, Shift.DisplayOrder, Shift.ShiftName, Shift.ShiftID
                     """, (1 if tomorrow else 0, physch_abbr))
                 shifts = [shift for shift, in cursor] # type: ignore
                 if len(shifts) > 0:
@@ -168,9 +169,10 @@ class XMPP(slixmpp.ClientXMPP):
             return '''\nEchoBot commands:\nroster: Show today's roster\nroster tomorrow: Show tomorrow's roster\nroster <name or login>: Show roster for another user'''
 
     async def main_loop(self):
-        async with self.pool.connection() as conn:
+        if XMPP_RESET_PRESENCE:
             logging.info("XMPP setting all users to offline...")
-            await conn.execute("update users set pacs_presence='Offline'")
+            async with self.pool.connection() as conn:
+                await conn.execute("update users set pacs_presence='Offline'")
         while True:
             try:
                 logging.info("XMPP client connecting...")
