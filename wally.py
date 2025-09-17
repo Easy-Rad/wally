@@ -6,6 +6,9 @@ from psycopg_pool import AsyncConnectionPool
 from xmpp import XMPP
 from ps360 import PS360
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 DB_CONN = environ['DB_CONN']
 
 async def main():
@@ -22,7 +25,9 @@ async def main():
         await asyncio.gather(xmpp_task, ps360_task)
     
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, format='%(levelname)-8s %(message)s')
+    TZ=ZoneInfo("Pacific/Auckland")
+    logging.Formatter.converter = lambda *args: datetime.now(tz=TZ).timetuple()
+    logging.basicConfig(level=logging.INFO, format='%(levelname)-8s %(asctime)s %(message)s')
     logging.getLogger("httpx").setLevel(logging.WARNING)
     try:
         asyncio.run(main())

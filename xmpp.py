@@ -127,7 +127,11 @@ class XMPP(slixmpp.ClientXMPP):
                     and Employee.Abbr = %s
                     order by Shift.DisplayOrder, Shift.ShiftName
                     """, (1 if tomorrow else 0, physch_abbr))
-                return f'''\n{"Tomorrow" if tomorrow else "Today"}'s roster for {first_name} {last_name} ({physch_abbr}):\n{'\n'.join(shift for shift, in cursor)}''' # type: ignore
+                shifts = [shift for shift, in cursor] # type: ignore
+                if len(shifts) > 0:
+                    return f'''\n{"Tomorrow" if tomorrow else "Today"}'s roster for {first_name} {last_name} ({physch_abbr}):\n{'\n'.join(shifts)}'''
+                else:
+                    return f'{first_name} {last_name} ({physch_abbr}) is not rostered {"tomorrow" if tomorrow else "today"}'
 
     async def generate_response(self, msg: slixmpp.Message) -> str:
         message: str = msg['body'].strip()
@@ -152,7 +156,10 @@ class XMPP(slixmpp.ClientXMPP):
                     result = await cur.fetchone()
             if result is not None:
                 first_name, last_name, physch = result
-                return await self.phys_sched_roster(first_name, last_name, physch, tomorrow)
+                if physch is not None:
+                    return await self.phys_sched_roster(first_name, last_name, physch, tomorrow)
+                else:
+                    return f'My database does not contain the PhysSched code for {first_name} {last_name}'
             elif pacs is not None:
                 return f'Username "{pacs}" is not registered in the database, please contact my overlords'
             else:
