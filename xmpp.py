@@ -116,7 +116,7 @@ class XMPP(slixmpp.ClientXMPP):
             reply.send()
 
 
-    async def phys_sched_roster(self, first_name: str, last_name: str, physch_abbr: str, tomorrow: bool) -> str:
+    def phys_sched_roster(self, first_name: str, last_name: str, physch_abbr: str, tomorrow: bool) -> str:
         with phys_sched_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(r"""
@@ -134,11 +134,34 @@ class XMPP(slixmpp.ClientXMPP):
                 else:
                     return f'{first_name} {last_name} ({physch_abbr}) is not rostered {"tomorrow" if tomorrow else "today"}'
 
+    def phys_sched_meetings(self, tomorrow: bool) -> str:
+        with phys_sched_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(r"""
+                    select
+                        timefromparts(Shift.StartTime/100, Shift.StartTime%100, 0, 0, 0),
+                        ShiftName,
+                        Employee.FirstName,
+                        Employee.LastName
+                    from SchedData
+                            join Employee on SchedData.EmployeeID = Employee.EmployeeID
+                            join Shift on SchedData.ShiftID = Shift.ShiftID
+                    where AssignDate = year(CURRENT_TIMESTAMP) * 10000 + month(CURRENT_TIMESTAMP) * 100 + day(CURRENT_TIMESTAMP) + %s
+                    and (AssignID in (109, 37) -- 3 SMO Clinical MDMs am, 4 SMO Clinical MDMs pm
+                    or Shift.ShiftID = 1982) -- Gen Med Meeting Reg
+                    and ShiftName not like '%Prep'
+                    and Employee.EmployeeID <> 33 -- RMO/Fellow placeholder
+                    order by Shift.StartTime, ShiftName
+                    """, (1 if tomorrow else 0,))
+                meetings = [f'{start_time:%H:%M}: {shift_name}: {first_name} {last_name}' for start_time, shift_name, first_name, last_name in cursor] # type: ignore
+                if len(meetings) > 0:
+                    return f'''\n{"Tomorrow" if tomorrow else "Today"}'s meetings:\n{'\n'.join(meetings)}'''
+                else:
+                    return f'No meetings {"tomorrow" if tomorrow else "today"}'
+
     async def generate_response(self, msg: slixmpp.Message) -> str:
         message: str = msg['body'].strip()
-        roster_pattern = r"^roster(.*)$"
-        roster_match = re.search(roster_pattern, message, re.IGNORECASE)
-        if roster_match:
+        if roster_match := re.search(r"^roster(.*)$", message, re.IGNORECASE):
             custom_user: str | None = None
             tomorrow = False
             if roster_match.group(1).strip().lower() == 'tomorrow':
@@ -158,15 +181,24 @@ class XMPP(slixmpp.ClientXMPP):
             if result is not None:
                 first_name, last_name, physch = result
                 if physch is not None:
-                    return await self.phys_sched_roster(first_name, last_name, physch, tomorrow)
+                    return self.phys_sched_roster(first_name, last_name, physch, tomorrow)
                 else:
                     return f'My database does not contain the PhysSched code for {first_name} {last_name}'
             elif pacs is not None:
                 return f'Username "{pacs}" is not registered in the database, please contact my overlords'
             else:
                 return f'Could not find a user matching "{custom_user}"'
+        elif meetings_match := re.search(r"^meetings(.*)$", message, re.IGNORECASE):
+            tomorrow = meetings_match.group(1).strip().lower() == 'tomorrow'
+            return self.phys_sched_meetings(tomorrow)
         else:
-            return '''\nEchoBot commands:\nroster: Show today's roster\nroster tomorrow: Show tomorrow's roster\nroster <name or login>: Show roster for another user'''
+            return "\n" \
+                "EchoBot commands:\n" \
+                "roster: Show today's roster\n" \
+                "roster tomorrow: Show tomorrow's roster\n" \
+                "roster <name or login>: Show roster for another user\n" \
+                "meetings: Show today's meetings\n" \
+                "meetings tomorrow: Show tomorrow's meetings"
 
     async def main_loop(self):
         if XMPP_RESET_PRESENCE:
