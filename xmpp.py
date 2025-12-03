@@ -116,23 +116,39 @@ class XMPP(slixmpp.ClientXMPP):
             reply.send()
 
 
-    def phys_sched_roster(self, first_name: str, last_name: str, physch_abbr: str, tomorrow: bool) -> str:
-        with phys_sched_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(r"""
-                    select ShiftName
-                    from SchedData
+    def phys_sched_roster_user(self, first_name: str, last_name: str, physch_abbr: str, tomorrow: bool, cursor: pymssql.Cursor) -> str:
+        cursor.execute(r"""
+            select ShiftName
+            from SchedData
+            join Employee on SchedData.EmployeeID = Employee.EmployeeID
+            join Shift on SchedData.ShiftID = Shift.ShiftID
+            where AssignDate = year(CURRENT_TIMESTAMP) * 10000 + month(CURRENT_TIMESTAMP) * 100 + day(CURRENT_TIMESTAMP) + %s
+            and Employee.Abbr = %s
+            order by Shift.StartTime, Shift.EndTime, Shift.DisplayOrder, Shift.ShiftName, Shift.ShiftID
+            """, (1 if tomorrow else 0, physch_abbr))
+        shifts = [shift for shift, in cursor] # type: ignore
+        if len(shifts) > 0:
+            return f'''\n{"Tomorrow" if tomorrow else "Today"}'s roster for {first_name} {last_name} ({physch_abbr}):\n{'\n'.join(shifts)}'''
+        else:
+            return f'{first_name} {last_name} ({physch_abbr}) is not rostered {"tomorrow" if tomorrow else "today"}'
+
+    def phys_sched_roster_shift(self, shift_substr: str, tomorrow: bool, cursor: pymssql.Cursor) -> str | None:
+        cursor.execute(r"""
+            select ShiftName, Employee.FirstName, Employee.LastName
+            from SchedData
                     join Employee on SchedData.EmployeeID = Employee.EmployeeID
                     join Shift on SchedData.ShiftID = Shift.ShiftID
-                    where AssignDate = year(CURRENT_TIMESTAMP) * 10000 + month(CURRENT_TIMESTAMP) * 100 + day(CURRENT_TIMESTAMP) + %s
-                    and Employee.Abbr = %s
-                    order by Shift.StartTime, Shift.EndTime, Shift.DisplayOrder, Shift.ShiftName, Shift.ShiftID
-                    """, (1 if tomorrow else 0, physch_abbr))
-                shifts = [shift for shift, in cursor] # type: ignore
-                if len(shifts) > 0:
-                    return f'''\n{"Tomorrow" if tomorrow else "Today"}'s roster for {first_name} {last_name} ({physch_abbr}):\n{'\n'.join(shifts)}'''
-                else:
-                    return f'{first_name} {last_name} ({physch_abbr}) is not rostered {"tomorrow" if tomorrow else "today"}'
+            where AssignDate = year(CURRENT_TIMESTAMP) * 10000 + month(CURRENT_TIMESTAMP) * 100 + day(CURRENT_TIMESTAMP) + %s
+            and Shift.ShiftName like '%' + %s + '%'
+            and ShiftName not like '%Prep'
+            and Employee.EmployeeID <> 33 -- RMO/Fellow placeholder
+            order by Shift.StartTime, ShiftName
+            """, (1 if tomorrow else 0, shift_substr))
+        shifts = [f'{shift_name}: {first_name} {last_name}' for shift_name, first_name, last_name in cursor] # type: ignore
+        if len(shifts) > 0:
+            return f'''\n{"Tomorrow" if tomorrow else "Today"}'s roster for shifts matching "{shift_substr}":\n{'\n'.join(shifts)}'''
+        else:
+            return None
 
     def phys_sched_meetings(self, tomorrow: bool) -> str:
         with phys_sched_connection() as conn:
@@ -161,42 +177,43 @@ class XMPP(slixmpp.ClientXMPP):
 
     async def generate_response(self, msg: slixmpp.Message) -> str:
         message: str = msg['body'].strip()
-        if roster_match := re.search(r"^roster(.*)$", message, re.IGNORECASE):
-            custom_user: str | None = None
-            tomorrow = False
-            if roster_match.group(1).strip().lower() == 'tomorrow':
-                tomorrow = True
-            else:
-                custom_user = roster_match.group(1).strip() or None
+        if roster_match := re.search(r"^roster(.*?)(tomorrow)?$", message, re.IGNORECASE):
+            custom_roster = roster_match.group(1).strip() or None
+            tomorrow = roster_match.group(2) is not None
             async with self.pool.connection() as conn:
-                pacs = generate_pacs(msg.get_from().bare) if custom_user is None else None
-                if custom_user is None:
+                pacs = generate_pacs(msg.get_from().bare) if custom_roster is None else None
+                if custom_roster is None:
                     pacs = generate_pacs(msg.get_from().bare)
                     coroutine = conn.execute("select first_name, last_name, physch from users where pacs=%s", (pacs,))
                 else:
                     pacs = None
-                    coroutine = conn.execute("select first_name, last_name, physch from users where %s in (lower(pacs), lower(ris), lower(physch), lower(sso), lower(first_name), lower(last_name)) limit 1", (custom_user.lower(),))
+                    coroutine = conn.execute("select first_name, last_name, physch from users where %s in (lower(pacs), lower(ris), lower(physch), lower(sso), lower(first_name), lower(last_name)) limit 1", (custom_roster.lower(),))
                 async with await coroutine as cur:
                     result = await cur.fetchone()
-            if result is not None:
-                first_name, last_name, physch = result
-                if physch is not None:
-                    return self.phys_sched_roster(first_name, last_name, physch, tomorrow)
-                else:
-                    return f'My database does not contain the PhysSched code for {first_name} {last_name}'
-            elif pacs is not None:
+            if result is None and pacs is not None:
                 return f'Username "{pacs}" is not registered in the database, please contact my overlords'
+            elif result is not None:
+                first_name, last_name, physch = result
+                if physch is None:
+                    return f'My database does not contain the PhysSched code for {first_name} {last_name}'
             else:
-                return f'Could not find a user matching "{custom_user}"'
+                first_name = last_name = physch = None
+            with phys_sched_connection() as conn:
+                with conn.cursor() as cursor:
+                    if first_name is not None and last_name is not None and physch is not None:
+                        return self.phys_sched_roster_user(first_name, last_name, physch, tomorrow, cursor)
+                    elif custom_roster is not None and custom_roster:
+                        phys_sched_roster_shift = self.phys_sched_roster_shift(custom_roster, tomorrow, cursor)
+                        if phys_sched_roster_shift is not None: return phys_sched_roster_shift
+            return f'Could not find a user or shift matching "{custom_roster}"'
         elif meetings_match := re.search(r"^meetings(.*)$", message, re.IGNORECASE):
             tomorrow = meetings_match.group(1).strip().lower() == 'tomorrow'
             return self.phys_sched_meetings(tomorrow)
         else:
             return "\n" \
                 "EchoBot commands:\n" \
-                "roster: Show today's roster\n" \
-                "roster tomorrow: Show tomorrow's roster\n" \
-                "roster <name or login>: Show roster for another user\n" \
+                "roster <name/login/shift>: Show today's roster\n" \
+                "roster <name/login/shift> tomorrow: Show tomorrow's roster\n" \
                 "meetings: Show today's meetings\n" \
                 "meetings tomorrow: Show tomorrow's meetings"
 
