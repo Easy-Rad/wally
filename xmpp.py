@@ -11,7 +11,8 @@ from psycopg_pool import AsyncConnectionPool
 
 XMPP_JID = environ['XMPP_JID']
 XMPP_PASSWORD = environ['XMPP_PASSWORD']
-XMPP_SERVER = environ.get('XMPP_SERVER', 'app-inteleradha-p.healthhub.health.nz')
+XMPP_SERVER = environ.get(
+    'XMPP_SERVER', 'app-inteleradha-p.healthhub.health.nz')
 XMPP_PORT = int(environ.get('XMPP_PORT', '5222'))
 XMPP_RESET_PRESENCE = (environ.get('XMPP_RESET_PRESENCE', 'False') == 'True')
 PHYSCH_HOST = environ['PHYSCH_HOST']
@@ -19,7 +20,8 @@ PHYSCH_DB = environ.get('PHYSCH_DB', 'PhySch')
 SSO_USER = environ['SSO_USER']
 SSO_PASSWORD = environ['SSO_PASSWORD']
 
-RECONNECT_DELAY = 15 # seconds
+RECONNECT_DELAY = 15  # seconds
+
 
 def phys_sched_connection():
     return pymssql.connect(
@@ -30,11 +32,13 @@ def phys_sched_connection():
         tds_version='7.4',
     )
 
+
 class Presence(enum.StrEnum):
     AVAILABLE = "Available"
     AWAY = "Away"
     BUSY = "Busy"
     OFFLINE = "Offline"
+
 
 def presence_from_dict(d: dict[str, dict]) -> Presence:
     try:
@@ -51,11 +55,14 @@ def presence_from_dict(d: dict[str, dict]) -> Presence:
     except StopIteration:
         return Presence.OFFLINE
 
+
 def generate_jid(pacs: str):
     return re.sub(r'([A-Z])', lambda m: '|' + m.group(1).lower(), pacs) + '@cdhb'
 
+
 def generate_pacs(jid: str):
     return re.sub(r'\|([a-z])', lambda m: m.group(1).upper(), jid.split('@')[0])
+
 
 @dataclass
 class User:
@@ -69,6 +76,7 @@ class User:
             presence=self.presence.value,
             updated=self.updated,
         )
+
 
 class XMPP(slixmpp.ClientXMPP):
 
@@ -91,7 +99,8 @@ class XMPP(slixmpp.ClientXMPP):
     async def on_changed_status(self, presence: slixmpp.Presence):
         jid = presence.get_from().bare
         pacs = generate_pacs(jid)
-        new_presence = presence_from_dict(self.client_roster.presence(jid)) # type: ignore
+        new_presence = presence_from_dict(
+            self.client_roster.presence(jid))  # type: ignore
         async with self.pool.connection() as conn:
             async with await conn.execute('''update users set pacs_presence=%s, pacs_last_updated=now() where pacs=%s and pacs_presence<>%s''', (
                 new_presence,
@@ -100,21 +109,24 @@ class XMPP(slixmpp.ClientXMPP):
             )) as cur:
                 if (cur.rowcount > 0):
                     logging.info(f'{pacs}: {new_presence}')
-                
 
     async def on_message_received(self, msg: slixmpp.Message):
         if msg.get_type() == 'chat':
-            logging.info(f'{generate_pacs(msg.get_from().bare)}: "{msg['body']}"')
+            logging.info(
+                f'{generate_pacs(msg.get_from().bare)}: "{msg['body']}"')
             payload = next((p for p in (
-                msg.xml.find('{com.intelerad.viewer.im.extensions.orderContainer2}orderContainer'),
-                msg.xml.find('{com.intelerad.viewer.im.extensions.orderContainer}orderContainer'),
-                msg.xml.find('{com.intelerad.viewer.im.extensions.phoneRequestAction}phoneRequestAction'),
+                msg.xml.find(
+                    '{com.intelerad.viewer.im.extensions.orderContainer2}orderContainer'),
+                msg.xml.find(
+                    '{com.intelerad.viewer.im.extensions.orderContainer}orderContainer'),
+                msg.xml.find(
+                    '{com.intelerad.viewer.im.extensions.phoneRequestAction}phoneRequestAction'),
             ) if p is not None), None)
             reply = msg.reply(msg['body'] if payload is not None else f'{await self.generate_response(msg)}')
             reply.set_to(reply.get_to().bare)
-            if payload is not None: reply.set_payload(slixmpp.ElementBase(payload))
+            if payload is not None:
+                reply.set_payload(slixmpp.ElementBase(payload))
             reply.send()
-
 
     def phys_sched_roster_user(self, first_name: str, last_name: str, physch_abbr: str, tomorrow: bool, cursor: pymssql.Cursor) -> str:
         cursor.execute(r"""
@@ -126,7 +138,7 @@ class XMPP(slixmpp.ClientXMPP):
             and Employee.Abbr = %s
             order by Shift.StartTime, Shift.EndTime, Shift.DisplayOrder, Shift.ShiftName, Shift.ShiftID
             """, (1 if tomorrow else 0, physch_abbr))
-        shifts = [shift for shift, in cursor] # type: ignore
+        shifts = [shift for shift, in cursor]  # type: ignore
         if len(shifts) > 0:
             return f'''\n{"Tomorrow" if tomorrow else "Today"}'s roster for {first_name} {last_name} ({physch_abbr}):\n{'\n'.join(shifts)}'''
         else:
@@ -141,10 +153,11 @@ class XMPP(slixmpp.ClientXMPP):
             where AssignDate = year(CURRENT_TIMESTAMP) * 10000 + month(CURRENT_TIMESTAMP) * 100 + day(CURRENT_TIMESTAMP) + %s
             and Shift.ShiftName like '%' + %s + '%'
             and ShiftName not like '%Prep'
-            and Employee.EmployeeID <> 33 -- RMO/Fellow placeholder
+            and Employee.EmployeeID not in (33, 34)
             order by Shift.StartTime, ShiftName
             """, (1 if tomorrow else 0, shift_substr))
-        shifts = [f'{shift_name}: {first_name} {last_name}' for shift_name, first_name, last_name in cursor] # type: ignore
+        shifts = [f'{shift_name}: {first_name} {last_name}' for shift_name,
+                  first_name, last_name in cursor]  # type: ignore
         if len(shifts) > 0:
             return f'''\n{"Tomorrow" if tomorrow else "Today"}'s roster for shifts matching "{shift_substr}":\n{'\n'.join(shifts)}'''
         else:
@@ -166,10 +179,11 @@ class XMPP(slixmpp.ClientXMPP):
                     and (AssignID in (109, 37) -- 3 SMO Clinical MDMs am, 4 SMO Clinical MDMs pm
                     or Shift.ShiftID = 1982) -- Gen Med Meeting Reg
                     and ShiftName not like '%Prep'
-                    and Employee.EmployeeID <> 33 -- RMO/Fellow placeholder
+                    and Employee.EmployeeID not in (33, 34)
                     order by Shift.StartTime, ShiftName
                     """, (1 if tomorrow else 0,))
-                meetings = [f'{start_time:%H:%M}: {shift_name}: {first_name} {last_name}' for start_time, shift_name, first_name, last_name in cursor] # type: ignore
+                meetings = [f'{start_time:%H:%M}: {shift_name}: {first_name} {last_name}' for start_time,
+                            shift_name, first_name, last_name in cursor]  # type: ignore
                 if len(meetings) > 0:
                     return f'''\n{"Tomorrow" if tomorrow else "Today"}'s meetings:\n{'\n'.join(meetings)}'''
                 else:
@@ -181,13 +195,16 @@ class XMPP(slixmpp.ClientXMPP):
             custom_roster = roster_match.group(1).strip() or None
             tomorrow = roster_match.group(2) is not None
             async with self.pool.connection() as conn:
-                pacs = generate_pacs(msg.get_from().bare) if custom_roster is None else None
+                pacs = generate_pacs(
+                    msg.get_from().bare) if custom_roster is None else None
                 if custom_roster is None:
                     pacs = generate_pacs(msg.get_from().bare)
-                    coroutine = conn.execute("select first_name, last_name, physch from users where pacs=%s", (pacs,))
+                    coroutine = conn.execute(
+                        "select first_name, last_name, physch from users where pacs=%s", (pacs,))
                 else:
                     pacs = None
-                    coroutine = conn.execute("select first_name, last_name, physch from users where %s in (lower(pacs), lower(ris), lower(physch), lower(sso), lower(first_name), lower(last_name)) limit 1", (custom_roster.lower(),))
+                    coroutine = conn.execute(
+                        "select first_name, last_name, physch from users where %s in (lower(pacs), lower(ris), lower(physch), lower(sso), lower(first_name), lower(last_name)) limit 1", (custom_roster.lower(),))
                 async with await coroutine as cur:
                     result = await cur.fetchone()
             if result is None and pacs is not None:
@@ -203,8 +220,10 @@ class XMPP(slixmpp.ClientXMPP):
                     if first_name is not None and last_name is not None and physch is not None:
                         return self.phys_sched_roster_user(first_name, last_name, physch, tomorrow, cursor)
                     elif custom_roster is not None and custom_roster:
-                        phys_sched_roster_shift = self.phys_sched_roster_shift(custom_roster, tomorrow, cursor)
-                        if phys_sched_roster_shift is not None: return phys_sched_roster_shift
+                        phys_sched_roster_shift = self.phys_sched_roster_shift(
+                            custom_roster, tomorrow, cursor)
+                        if phys_sched_roster_shift is not None:
+                            return phys_sched_roster_shift
             return f'Could not find a user or shift matching "{custom_roster}"'
         elif meetings_match := re.search(r"^meetings(.*)$", message, re.IGNORECASE):
             tomorrow = meetings_match.group(1).strip().lower() == 'tomorrow'
